@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import * as THREE from 'three';
+import { playCubeClick } from '../utils/audio';
 
 // Интерфейс для одного маленького кубика (одной из 26 деталей кубика Рубика)
 export interface Cubie {
@@ -534,6 +535,7 @@ export const useCubeStore = create<CubeState>()(
 
       rotateWholeCube: (axis, direction) => {
         if (get().isAnimating || get().isDragging) return;
+        playCubeClick();
         
         // Поворачиваем каждый из 3 слоев вдоль оси
         let newCubies = get().cubies;
@@ -606,6 +608,7 @@ export const useCubeStore = create<CubeState>()(
         }
 
         if (finished) {
+          playCubeClick();
           get().rotateLayer(state.animAxis, state.animValue, state.animDir);
         } else {
           set({ animAngle: nextAngle });

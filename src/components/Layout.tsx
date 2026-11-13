@@ -1,11 +1,13 @@
 import { Outlet, Link, useLocation } from 'react-router-dom';
 import { useThemeStore } from '../store';
-import { Moon, Sun, Box, Menu, X } from 'lucide-react';
+import { useAuthStore } from '../store/authStore';
+import { Moon, Sun, Box, Menu, X, User } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useState } from 'react';
 
 export function Layout() {
   const { isDark, toggleTheme } = useThemeStore();
+  const { user, isAuthenticated } = useAuthStore();
   const location = useLocation();
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
@@ -13,6 +15,8 @@ export function Layout() {
     { path: '/', label: 'О кубике' },
     { path: '/tutorial', label: 'Обучение' },
     { path: '/simulation', label: '3D Симуляция' },
+    { path: '/online', label: 'Дуэли' },
+    { path: '/profile', label: 'Кабинет' },
   ];
 
   return (
@@ -52,9 +56,27 @@ export function Layout() {
           </nav>
           
           <div className="flex items-center gap-2">
+            {/* Quick Profile / Auth Pill Button */}
+            <Link
+              to="/profile"
+              onClick={() => setIsMobileMenuOpen(false)}
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-bold transition-all border ${
+                isAuthenticated
+                  ? 'bg-gradient-to-r from-brand-500/20 to-brand-400/20 text-brand-900 dark:text-brand-100 border-brand-400/40 hover:border-brand-400 shadow-sm'
+                  : 'bg-brand-400/10 hover:bg-brand-400/20 text-brand-800 dark:text-brand-50 border-brand-400/20 active:scale-95'
+              }`}
+            >
+              <div className="w-5 h-5 rounded-full bg-brand-500 flex items-center justify-center text-[10px] font-black text-white shrink-0">
+                {isAuthenticated ? ((user?.profile?.nickname || user?.username || 'U')[0].toUpperCase()) : <User className="w-3 h-3" />}
+              </div>
+              <span className="hidden sm:inline">
+                {isAuthenticated ? (user?.profile?.nickname || user?.username) : 'Войти'}
+              </span>
+            </Link>
+
             <button 
               onClick={toggleTheme}
-              className="p-2.5 rounded-full bg-brand-400/10 hover:bg-brand-400/20 text-brand-800 dark:text-brand-50 transition-all active:scale-95"
+              className="p-2.5 rounded-full bg-brand-400/10 hover:bg-brand-400/20 text-brand-800 dark:text-brand-50 transition-all active:scale-95 cursor-pointer"
               aria-label="Переключить тему"
             >
               {isDark ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}

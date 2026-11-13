@@ -4,6 +4,7 @@ import React, { useMemo, useRef, useState, useEffect } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { PyraminxSolver } from '../utils/pyraminxSolver';
+import { playCubeClick } from '../utils/audio';
 
 
 
@@ -25,6 +26,10 @@ const faces = [
   [1, 3, 2]
 ];
 const faceColors = ['#199B35', '#D12A2A', '#1B5FE3', '#F2D11F'];
+
+// Переиспользуемые кватернионы для оптимизации анимации в Firefox
+const _scratchPyrQuat = new THREE.Quaternion();
+const _scratchPyrRot = new THREE.Quaternion();
 
 function W(A: THREE.Vector3, B: THREE.Vector3, C: THREE.Vector3, wA: number, wB: number, wC: number) {
   return new THREE.Vector3()
@@ -143,6 +148,7 @@ function PyraminxSticker({ sticker, onPointerDown }: any) {
 }
 function PyraminxPieceView({ piece, animRef, dragRef }: any) {
   const groupRef = useRef<THREE.Group>(null);
+  const isDirtyRef = useRef(true);
   
   const baseMesh = useMemo(() => {
     const pts = [];
@@ -167,22 +173,38 @@ function PyraminxPieceView({ piece, animRef, dragRef }: any) {
   
 
   
+  useEffect(() => {
+    isDirtyRef.current = true;
+  }, [piece.quaternion]);
+
   useFrame(() => {
     if (groupRef.current) {
-      let finalQuat = piece.quaternion.clone();
+      const isAnimating = animRef.current && animRef.current.activePieces.includes(piece.logicalId);
+      const isDragging = dragRef.current && dragRef.current.lockedAxis;
+
+      // Оптимизация для Firefox: если деталь не движется и позиция синхронизирована — пропускаем вычисления
+      if (!isAnimating && !isDragging) {
+        if (!isDirtyRef.current) return;
+        isDirtyRef.current = false;
+        groupRef.current.quaternion.copy(piece.quaternion);
+        return;
+      }
+      isDirtyRef.current = true;
+
+      _scratchPyrQuat.copy(piece.quaternion);
       
-      if (animRef.current && animRef.current.activePieces.includes(piece.logicalId)) {
-        const q = new THREE.Quaternion().setFromAxisAngle(animRef.current.axis, animRef.current.currentAngle);
-        finalQuat.premultiply(q);
-      } else if (dragRef.current && dragRef.current.lockedAxis) {
+      if (isAnimating) {
+        _scratchPyrRot.setFromAxisAngle(animRef.current.axis, animRef.current.currentAngle);
+        _scratchPyrQuat.premultiply(_scratchPyrRot);
+      } else if (isDragging) {
         const activeIds = getBlockPieces(dragRef.current.lockedAxis.axisIdx, dragRef.current.lockedAxis.layer);
         if (activeIds.includes(piece.logicalId)) {
-          const q = new THREE.Quaternion().setFromAxisAngle(AXES[dragRef.current.lockedAxis.axisIdx], dragRef.current.dragAngle);
-          finalQuat.premultiply(q);
+          _scratchPyrRot.setFromAxisAngle(AXES[dragRef.current.lockedAxis.axisIdx], dragRef.current.dragAngle);
+          _scratchPyrQuat.premultiply(_scratchPyrRot);
         }
       }
       
-      groupRef.current.quaternion.copy(finalQuat);
+      groupRef.current.quaternion.copy(_scratchPyrQuat);
     }
   });
 
@@ -555,6 +577,7 @@ export function Pyraminx() {
       
       if (Math.abs(diff) < 0.01) {
          anim.currentAngle = anim.targetAngle;
+         playCubeClick();
          const rotQuat = new THREE.Quaternion().setFromAxisAngle(anim.axis, anim.targetAngle);
          if (anim.historyMove) {
            setHistory(prev => [...prev, anim.historyMove]);

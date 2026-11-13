@@ -5,6 +5,8 @@ import { Canvas } from '@react-three/fiber';
 import { ErrorBoundary } from '../ErrorBoundary';
 import { OrbitControls } from '@react-three/drei';
 import { useCubeStore } from '../store/cubeStore';
+import { useAuthStore } from '../store/authStore';
+import { playVictorySound } from '../utils/audio';
 import type { Cubie } from '../store/cubeStore';
 import * as THREE from 'three';
 import { RoundedBox } from '@react-three/drei';
@@ -17,10 +19,12 @@ import { boxArgs, stickerGeometry, materials } from '../utils/cubeStyles';
   function AnimationController() {
   const isAnimating = useCubeStore(state => state.isAnimating);
   const updateAnimation = useCubeStore(state => state.updateAnimation);
+  const user = useAuthStore(state => state.user);
+  const sensitivity = user?.settings?.cube_sensitivity || 1.0;
 
   useFrame((_, delta) => {
     if (isAnimating) {
-      const speed = 10.0; // Скорость вращения (радиан в секунду)
+      const speed = 10.0 * sensitivity; // Скорость вращения с учетом настроек профиля
       updateAnimation(speed * delta);
     }
   });
@@ -28,8 +32,32 @@ import { boxArgs, stickerGeometry, materials } from '../utils/cubeStyles';
   return null;
 }
 
+// Переиспользуемые математические объекты для оптимизации GC и WebGL в Firefox (исключают утечки и паузы сборщика мусора)
+const _dragNormal = new THREE.Vector3();
+const _dragPlane = new THREE.Plane();
+const _scratchBasePos = new THREE.Vector3();
+const _scratchBaseQuat = new THREE.Quaternion();
+const _scratchAxisVec = new THREE.Vector3();
+const _scratchQ = new THREE.Quaternion();
+const _scratchOffset = new THREE.Vector3();
+
+// Пул материалов: исключает дублирование шейдерных программ и снижает draw-calls в WebGL
+const materialCache = new Map<string, THREE.MeshStandardMaterial>();
+
+function getCachedMaterial(colorHex: string) {
+  let mat = materialCache.get(colorHex);
+  if (!mat) {
+    mat = new THREE.MeshStandardMaterial({
+      color: colorHex,
+      roughness: colorHex.toLowerCase() === '#ffffff' ? 0.2 : 0.1,
+      metalness: colorHex.toLowerCase() === '#ffffff' ? 0.6 : 0.1,
+    });
+    materialCache.set(colorHex, mat);
+  }
+  return mat;
+}
+
 // Контроллер перетаскивания (Drag & Drop)
-// Использует Raycaster для проецирования позиции мыши/пальца в 3D плоскость вращения
 function DragController() {
   const isDragging = useCubeStore(state => state.isDragging);
   const dragFace = useCubeStore(state => state.dragFace);
@@ -43,17 +71,12 @@ function DragController() {
 
   useFrame(() => {
     if (isDragging && dragFace && startPoint) {
-      // Бросаем луч от камеры к курсору
       raycaster.setFromCamera(pointer, camera);
-      
-      const normal = new THREE.Vector3();
-      normal[dragFace] = dragSign || 1;
-      
-      // Создаем невидимую плоскость в месте клика
-      const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, startPoint);
-      if (raycaster.ray.intersectPlane(plane, targetPoint)) {
-         // Передаем точку пересечения в стор для расчета угла
-         updateDrag3D(targetPoint);
+      _dragNormal.set(0, 0, 0);
+      _dragNormal[dragFace] = dragSign || 1;
+      _dragPlane.setFromNormalAndCoplanarPoint(_dragNormal, startPoint);
+      if (raycaster.ray.intersectPlane(_dragPlane, targetPoint)) {
+        updateDrag3D(targetPoint);
       }
     }
   });
@@ -61,25 +84,15 @@ function DragController() {
   return null;
 }
 
-
-
 function FlatSticker({ material, onPointerDown, colorHex, scale }: { material: THREE.Material, onPointerDown: (e: any) => void, colorHex?: string, scale?: number[] }) {
-    const scaleVec = scale ? new THREE.Vector3(scale[0], scale[1], scale[2]) : new THREE.Vector3(1,1,1);
-    
-    const customMat = useMemo(() => {
-      if (!colorHex) return null;
-      return new THREE.MeshStandardMaterial({ 
-        color: colorHex, 
-        roughness: colorHex === '#ffffff' ? 0.2 : 0.1, 
-        metalness: colorHex === '#ffffff' ? 0.6 : 0.1 
-      });
-    }, [colorHex]);
+  const mat = useMemo(() => {
+    if (colorHex) return getCachedMaterial(colorHex);
+    return material;
+  }, [colorHex, material]);
 
-    if (colorHex && customMat) {
-      return <mesh onPointerDown={onPointerDown} geometry={stickerGeometry} material={customMat} scale={scaleVec} />;
-    }
-    return <mesh onPointerDown={onPointerDown} geometry={stickerGeometry} material={material} scale={scaleVec} />;
-  }
+  const scaleArr = scale as any || [1, 1, 1];
+  return <mesh onPointerDown={onPointerDown} geometry={stickerGeometry} material={mat} scale={scaleArr} />;
+}
 
 
 // 2D развертка кубика для раскраски
@@ -170,6 +183,7 @@ function CubieMesh({ cubie }: { cubie: any }) {
     const is2x2 = puzzleType === '2x2';
 
     const groupRef = useRef<THREE.Group>(null);
+    const isDirtyRef = useRef(true);
 
     const initX = cubie.initialPosition.x;
     const initY = cubie.initialPosition.y;
@@ -180,7 +194,7 @@ function CubieMesh({ cubie }: { cubie: any }) {
     const yOffsets: Record<string, number> = { '-1': 0.10, '0': 0, '1': 0.10 };
     const zOffsets: Record<string, number> = { '-1': 0.05, '0': 0, '1': 0.05 };
 
-        const boxScale = isMirror ? [
+    const boxScale = isMirror ? [
       initX === 1 ? 1.3 : (initX === -1 ? 0.7 : 1.0),
       initY === 1 ? 1.2 : (initY === -1 ? 0.8 : 1.0),
       initZ === 1 ? 1.1 : (initZ === -1 ? 0.9 : 1.0)
@@ -200,31 +214,51 @@ function CubieMesh({ cubie }: { cubie: any }) {
       isMirror ? zOffsets[initZ.toString()] : 0
     ), [isMirror, initX, initY, initZ, xOffsets, yOffsets, zOffsets]);
 
+    useEffect(() => {
+      isDirtyRef.current = true;
+    }, [cubie.position, cubie.rotation]);
+
     useFrame(() => {
       if (!groupRef.current) return;
       const state = useCubeStore.getState();
-      const latestCubie = state.cubies.find(c => c.id === cubie.id) || cubie;
       const isActive = state.isAnimating || state.isDragging;
+
+      // Если кубик неподвижен и позиция уже обновлена — пропускаем кадр (экономия CPU/GPU в Firefox)
+      if (!isActive) {
+        if (!isDirtyRef.current) return;
+        isDirtyRef.current = false;
+      } else {
+        isDirtyRef.current = true;
+      }
+
+      const latestCubie = state.cubies.find(c => c.id === cubie.id) || cubie;
       const activeAxis = state.isAnimating ? state.animAxis : state.dragAxis;
       const activeValue = state.isAnimating ? state.animValue : state.dragValue;
       const angle = state.isAnimating ? state.animAngle : state.dragAngle;
       
-      const basePos = latestCubie.position.clone();
-      const baseQuat = new THREE.Quaternion().setFromEuler(latestCubie.rotation);
+      _scratchBasePos.copy(latestCubie.position);
+      _scratchBaseQuat.setFromEuler(latestCubie.rotation);
       
       if (isActive && activeAxis && latestCubie.position[activeAxis] === activeValue) {
-        const axisVec = new THREE.Vector3();
-        axisVec[activeAxis] = 1;
-        const q = new THREE.Quaternion().setFromAxisAngle(axisVec, angle);
-        basePos.applyQuaternion(q);
-        baseQuat.premultiply(q);
+        _scratchAxisVec.set(0, 0, 0);
+        _scratchAxisVec[activeAxis] = 1;
+        _scratchQ.setFromAxisAngle(_scratchAxisVec, angle);
+        _scratchBasePos.applyQuaternion(_scratchQ);
+        _scratchBaseQuat.premultiply(_scratchQ);
       }
       
-      groupRef.current.position.copy(basePos).add(localOffset.clone().applyQuaternion(baseQuat));
-      groupRef.current.quaternion.copy(baseQuat);
+      _scratchOffset.copy(localOffset).applyQuaternion(_scratchBaseQuat);
+      groupRef.current.position.copy(_scratchBasePos).add(_scratchOffset);
+      groupRef.current.quaternion.copy(_scratchBaseQuat);
     });
 
+    const user = useAuthStore(state => state.user);
+    const customColors = user?.settings?.custom_colors;
+
     const mapPaintColor = (code: string) => {
+      if (customColors && (customColors as Record<string, string>)[code]) {
+        return (customColors as Record<string, string>)[code];
+      }
       const map: Record<string, string> = {
         U: '#F2D11F', R: '#D12A2A', F: '#199B35',
         D: '#EEEEEE', L: '#E86B0C', B: '#1B5FE3'
@@ -239,7 +273,7 @@ function CubieMesh({ cubie }: { cubie: any }) {
       }
       if (isMirror) return "#cccccc";
       
-      const originalColor = {
+      const originalColor = (customColors && (customColors as Record<string, string>)[face as string]) || {
         U: '#F2D11F', D: '#EEEEEE', R: '#D12A2A', L: '#E86B0C', F: '#199B35', B: '#1B5FE3'
       }[face as string];
       
@@ -290,7 +324,7 @@ function CubieMesh({ cubie }: { cubie: any }) {
             <meshStandardMaterial color="#cccccc" roughness={0.5} metalness={0.8} />
           </mesh>
         ) : (
-          <RoundedBox args={actualBoxArgs as any} radius={0.05} smoothness={4} material={materials.base} />
+          <RoundedBox args={actualBoxArgs as any} radius={0.05} smoothness={2} material={materials.base} />
         )}
         <group position={[renderOffsetX, 0, 0]} rotation={[0, Math.PI / 2, 0]}>
           {initX === 1 && <FlatSticker colorHex={getColor('R')} material={materials.R} onPointerDown={(e) => handlePointerDown('R', e)} scale={getStickerScale('R')} />}
@@ -347,6 +381,9 @@ export function Simulation() {
     const handlePyrUpdate = (e: any) => {
       setPyrMoveCount(e.detail.moveCount);
       setIsPyrSolved(e.detail.isSolved);
+      if (e.detail.isSolved && e.detail.moveCount > 0) {
+        playVictorySound();
+      }
     };
     window.addEventListener('pyr-state-update', handlePyrUpdate);
     const handlePyrErr = (e: any) => setPaintError(e.detail.message);
@@ -410,7 +447,12 @@ export function Simulation() {
           if (Math.abs(currQuat.angleTo(idQuat)) > 0.01) solved = false;
         });
         currentIsSolved = solved;
-        if (solved !== isSolved) setIsSolved(solved);
+        if (solved !== isSolved) {
+          setIsSolved(solved);
+          if (solved && moveCount > 0) {
+            playVictorySound();
+          }
+        }
       }
 
       const currentMoveCount = puzzleType === 'pyraminx' ? pyrMoveCount : moveCount;
@@ -561,6 +603,7 @@ export function Simulation() {
     <div className="flex flex-col lg:flex-row min-h-[calc(100vh-4rem)] lg:h-[calc(100vh-4rem)] p-4 lg:p-6 gap-6 max-w-[1600px] mx-auto w-full">
       <div 
         ref={containerRef}
+        style={{ willChange: 'transform', transform: 'translateZ(0)' }}
         className="flex-grow relative rounded-3xl overflow-hidden bg-brand-900/5 dark:bg-brand-50/5 border border-brand-400/20 shadow-inner flex items-center justify-center min-h-[50vh] touch-none"
         onContextMenu={(e) => e.preventDefault()}
         onPointerUp={handlePointerUp}
@@ -620,7 +663,19 @@ export function Simulation() {
         </div>
 
         <div className={`absolute inset-0 transition-opacity duration-1000 ${isLoading ? 'opacity-0' : 'opacity-100'}`}>
-          <Canvas camera={{ position: [5, 4, 6], fov: 45, zoom: typeof window !== 'undefined' && window.innerWidth < 768 ? 0.8 : 1 }}>
+          <Canvas 
+            dpr={[1, 1.5]}
+            performance={{ min: 0.5 }}
+            gl={{
+              powerPreference: 'high-performance',
+              antialias: true,
+              alpha: true,
+              stencil: false,
+              depth: true,
+              precision: 'highp'
+            }}
+            camera={{ position: [5, 4, 6], fov: 45, zoom: typeof window !== 'undefined' && window.innerWidth < 768 ? 0.8 : 1 }}
+          >
             <ambientLight intensity={0.9} />
             <directionalLight position={[10, 15, 10]} intensity={1.5} />
             <directionalLight position={[-10, -10, -10]} intensity={0.8} />
